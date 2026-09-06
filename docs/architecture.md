@@ -37,18 +37,21 @@ This bounds total OpenWeather usage to `(number of grid cells) × (refreshes per
 
 | Module | Responsibility | API budget used |
 |---|---|---|
+| `lib/weather/config.ts` | The tunable dials (cell size, refresh intervals, quota) — nothing else reads env vars directly | none |
 | `lib/weather/grid.ts` | Defines the grid over the area of interest (Kota bounding box), cell size, cell-id ↔ lat/lng math | none |
-| `lib/weather/refresh-job.ts` | Scheduled job: one OpenWeather One Call per grid cell, writes to cache | OpenWeather (bounded, scheduled) |
-| `lib/weather/cache.ts` | Read/write store for `{cellId → {rainMm, risk, updatedAt}}` | none |
-| `lib/maps/directions.ts` | Calls Directions API (`alternatives=true`), decodes polylines into sample points | Google (Directions) |
-| `lib/maps/elevation.ts` | Batch Elevation API call for sample points along a route | Google (Elevation) |
-| `lib/maps/roads.ts` | Snap-to-roads for precise road geometry when needed | Google (Roads) |
-| `lib/maps/geocode.ts` | Existing — click → lat/lng → road/area name | Google (Geocoding) |
-| `lib/risk/scoring.ts` | Pure function: `(rainMm, elevation) → risk` | none |
-| `lib/risk/route-aggregate.ts` | Combine per-point risk into a route-level score | none |
-| `app/api/route-risk/route.ts` | Route Handler tying the above together for route mode | — |
-| `app/components/RouteMap.tsx` | Renders candidate routes, colored by risk | — |
-| `app/components/RiskPanel.tsx` | Shows a clicked point's cached rainfall + risk | — |
+| `lib/weather/refresh-job.ts` | Two scheduled jobs: `runRefreshJob` (rain, every 15 min) and `runOverviewRefreshJob` (AI summary, every 180 min), both one call per grid cell, writing to cache | OpenWeather (bounded, scheduled) |
+| `lib/weather/cache.ts` | Read/write store for `{cellId → {rainMm, risk, updatedAt, overview?, overviewUpdatedAt?}}` | none |
+| `lib/maps/polyline.ts` | Decodes Directions API polylines, resamples them at a fixed distance interval | none (local computation) |
+| `lib/maps/directions.ts` | Calls Directions API (`alternatives=true`) | Google (Directions) |
+| `lib/maps/elevation.ts` | Batch Elevation API call for sample points along a route — **implemented, currently disabled via `ELEVATION_ENABLED=false`** (see below) | Google (Elevation) |
+| `lib/risk/scoring.ts` | Pure functions: `scoreRainfall(rainMm)`, `adjustForElevation(risk, elevation, medianElevation)` | none |
+| `lib/risk/route-aggregate.ts` | Combine per-point risk into a route-level score (worst-point wins), rank routes | none |
+| `app/api/point-risk/route.ts` | Reads cached rainfall/risk/overview for a lat/lng (no live call) | none |
+| `app/api/route-risk/route.ts` | Route Handler tying the above together for route mode | Google (Directions, Elevation if enabled) |
+| `app/api/weather-refresh/route.ts` | Manual trigger to warm the cache during development, without restarting the server | OpenWeather (on-demand) |
+| `instrumentation.ts` | Starts both background refresh loops once per server instance | — |
+| `components/RouteMap.tsx` | Renders candidate routes, colored by risk; click-to-set origin/destination | — |
+| `components/Map.tsx` | Point-click demo: road/area name, rainfall, risk, AI overview | — |
 
 ## Data flow
 
@@ -61,14 +64,15 @@ This bounds total OpenWeather usage to `(number of grid cells) × (refreshes per
    - Extract rain volume (`rain.1h` / hourly forecast) and compute risk via `lib/risk/scoring.ts`.
    - Write `{cellId: {rainMm, risk, updatedAt}}` to cache.
 4. Total OpenWeather calls/day = `cells × (24×60/15)`. This number is fixed and known in advance — size the grid to fit the quota, not the other way around.
+5. A second, much slower job (`runOverviewRefreshJob`, default every 180 min) fetches OpenWeather's AI-generated `weather_overview` per cell from the `/onecall/overview` endpoint and merges it into the same cache entry. It runs far less often than the rain job because the human-readable summary doesn't need 15-minute freshness — see the budget math below.
 
 ### B. Point click (user clicks a road/area)
 
 1. Google Geocoder: lat/lng → road/area name (already built).
 2. Map lat/lng → grid cell id.
-3. Read rainfall/risk from cache (no live API call).
-4. Optionally: Google Elevation API for that exact point to refine risk (cheap, always fresh, no quota concern).
-5. Display: road name, rainfall, risk badge.
+3. Read rainfall/risk/AI overview from cache (no live API call).
+4. Optionally: Google Elevation API for that exact point to refine risk (cheap, always fresh, no quota concern — currently disabled, see below).
+5. Display: road name, rainfall, risk badge, and OpenWeather's AI weather-overview summary for that cell.
 
 ### C. Route mode (origin → destination)
 
@@ -96,6 +100,8 @@ Elevation adjustment (since Google Elevation is cheap, use it to sharpen the rai
 - Below area's median elevation → bump risk one level up (e.g. Medium → High).
 - Above median elevation → risk stays as-is, or is dampened one level down at the boundary rainfall values.
 
+> **Status: implemented but disabled by default.** The Maps key currently isn't authorized for the Elevation API (`REQUEST_DENIED` from Google), so `ELEVATION_ENABLED` defaults to `false` in `.env.local`. While off, `app/api/route-risk/route.ts` skips the elevation lookup entirely and route risk falls back to rainfall-only scoring — the code in `lib/maps/elevation.ts` and `adjustForElevation` is untouched and ready to go. To turn it on: enable "Elevation API" for the Maps key's project in Google Cloud Console, then set `ELEVATION_ENABLED=true`.
+
 Route-level: `risk(route) = max(risk(point) for point in sampled points)`.
 
 ## Grid sizing — the main lever for OpenWeather cost control
@@ -117,16 +123,18 @@ Cell size and refresh interval are **not hardcoded** — they're the two dials t
 
 ```
 lib/weather/config.ts
-  WEATHER_GRID_CELL_KM       (default: 5)
-  WEATHER_REFRESH_MINUTES    (default: 15)
-  OPENWEATHER_DAILY_QUOTA    (default: 1000)
+  WEATHER_GRID_CELL_KM               (default: 5)
+  WEATHER_REFRESH_MINUTES            (default: 15)
+  WEATHER_OVERVIEW_REFRESH_MINUTES   (default: 180)
+  OPENWEATHER_DAILY_QUOTA            (default: 1000)
 ```
 
 With your current quota (**1000 calls/day**), solving the formula from [`tradeoffs.md`](./tradeoffs.md) for the ~15km × 15km Kota bounding box gives these defaults:
 
 - **Cell size: 5 km** → ~9 cells covering the area
-- **Refresh interval: 15 min** → 9 × (1440/15) = **864 calls/day**
-- **Buffer: ~136 calls/day** left over — covers the background job retrying a failed cell, plus the occasional manual point-check you mentioned you'll still do during development.
+- **Rain refresh: every 15 min** → 9 × (1440/15) = **864 calls/day**
+- **AI overview refresh: every 180 min** (it's a human-readable summary, not a number — doesn't need 15-min freshness) → 9 × (1440/180) = **72 calls/day**
+- **Total: 936 calls/day, ~64/day buffer** — covers the background job retrying a failed cell, plus the occasional manual point-check you mentioned you'll still do during development.
 
 `refresh-job.ts` calls a small guard, `estimateDailyCalls(cellKm, refreshMin, bboxAreaKm2)`, before starting, and logs a warning (not a hard stop) if the configured values would exceed `OPENWEATHER_DAILY_QUOTA`. That's the entire mechanism for "improving accuracy later":
 

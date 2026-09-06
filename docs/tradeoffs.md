@@ -11,6 +11,8 @@ Constraint driving every decision here: **OpenWeather quota is tight, Google Map
 | 5 | **Route risk = worst-point (max), not average** | Simpler, and doesn't require more granular data to compute | Slightly pessimistic — one bad cell can flag an otherwise-fine route as "High" | Safer to over-warn than under-warn for a flood-risk tool; the point is to avoid getting stuck, not to optimize for average conditions | — |
 | 6 | **No historical rainfall calibration (explicitly excluded per your request)** | Zero extra OpenWeather calls for historical lookups | Risk thresholds (10mm/30mm) are static guesses, not calibrated to what actually floods each road | Acceptable starting point; thresholds are isolated in one function (`lib/risk/scoring.ts`) so they're cheap to revisit later without touching the rest of the pipeline | — |
 | 7 | **Bounding box scoped to one city (Kota), not statewide/national** | Keeps the grid small regardless of cell size | Doesn't generalize automatically if you expand coverage later | Matches current scope (RTU Kota area); expanding later just means resizing the grid, not redesigning anything | — |
+| 8 | **AI weather-overview summary refreshed every 180 min, not every 15 min like rainfall** | Adds only ~72 calls/day instead of another ~864/day if it rode the same cadence as rain | The descriptive summary shown to users can be up to 3 hours stale | It's a human-readable narrative ("overcast, light rain expected...") — that framing doesn't meaningfully change minute to minute the way an mm/hr number does | — |
+| 9 | **Elevation adjustment implemented but disabled by default (`ELEVATION_ENABLED=false`)** | Zero Google Elevation calls until explicitly turned on | Route risk currently falls back to rainfall-only scoring — no low-lying-road sharpening | The Maps key isn't yet authorized for the Elevation API (`REQUEST_DENIED`); rather than block the rest of the pipeline, we gated it behind a flag so it's a one-line config change once the API is enabled, not a rewrite | N/A — this trade is about Google Maps setup, not OpenWeather cost |
 
 ## The one formula that matters
 
@@ -21,10 +23,13 @@ OpenWeather calls/day = (bounding box area / cell area) × (24×60 / refresh int
 **Solved for your quota (1,000 calls/day, ~15km × 15km Kota bounding box):**
 
 - Cell size: **5 km** → ~9 cells
-- Refresh interval: **15 min** → 9 × (1440/15) = **864 calls/day**
-- Buffer: **~136/day** headroom — covers job retries and the occasional manual point-check during development (you noted you won't be testing heavily, so this is a comfortable margin, not a tight squeeze)
+- Rain refresh: **15 min** → 9 × (1440/15) = **864 calls/day**
+- AI overview refresh (`weather_overview` from `/onecall/overview`): **180 min** → 9 × (1440/180) = **72 calls/day** — refreshed far less often since it's a descriptive summary, not a number that changes minute to minute
+- **Total: 936 calls/day, ~64/day buffer** — covers job retries and the occasional manual point-check during development (you noted you won't be testing heavily, so this is a comfortable margin, not a tight squeeze)
 
-These two numbers (`WEATHER_GRID_CELL_KM`, `WEATHER_REFRESH_MINUTES`) live in `lib/weather/config.ts`, read from env vars — nothing else in the pipeline reads the quota directly. That's deliberate: **raising the OpenWeather quota later is a config change, not a redesign.** Every downstream module (`cache.ts`, `scoring.ts`, `route-aggregate.ts`, all the Google Maps modules) only ever asks "what's the rainfall for this cell?" — it has no idea how big the cell is or how often it refreshes. So:
+This is trade-off #8 in the table above, in the same spirit as #3: the overview doesn't need the same freshness as rainfall, so it gets its own (much slower) refresh cadence instead of riding on the 15-minute rain job and doubling the call count.
+
+These numbers (`WEATHER_GRID_CELL_KM`, `WEATHER_REFRESH_MINUTES`, `WEATHER_OVERVIEW_REFRESH_MINUTES`) live in `lib/weather/config.ts`, read from env vars — nothing else in the pipeline reads the quota directly. That's deliberate: **raising the OpenWeather quota later is a config change, not a redesign.** Every downstream module (`cache.ts`, `scoring.ts`, `route-aggregate.ts`, all the Google Maps modules) only ever asks "what's the rainfall/overview for this cell?" — it has no idea how big the cell is or how often it refreshes. So:
 
 | New quota | New config | What improves |
 |---|---|---|
@@ -38,5 +43,5 @@ No code outside `lib/weather/config.ts` needs to change to move between these �
 ## What we deliberately did NOT trade away
 
 - **Route quality** — Directions API is called live, per request, with `alternatives=true`, at full accuracy. No caching/staleness here since Google Maps isn't the constrained resource.
-- **Elevation accuracy** — Elevation API is called live, per sample point (batched into one request per route), since it's cheap and doesn't expire like weather does.
+- **Elevation accuracy** — designed to be called live, per sample point (batched into one request per route), since it's cheap and doesn't expire like weather does. Currently gated off by `ELEVATION_ENABLED=false` pending the Elevation API being enabled on the Maps key's project (trade-off #9) — not a cost trade, a setup blocker.
 - **Road/geocoding accuracy** — Geocoding and Roads API stay live and per-request, same reasoning.

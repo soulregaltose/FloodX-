@@ -18,6 +18,14 @@ type ClickInfo = {
   address: string | null;
 };
 
+type PointRisk = {
+  ready: boolean;
+  rainMm?: number;
+  risk?: "low" | "medium" | "high";
+  overview?: string;
+  message?: string;
+};
+
 declare global {
   interface Window {
     google: typeof google;
@@ -30,6 +38,7 @@ export default function Map() {
   const geocoderRef = useRef<google.maps.Geocoder | null>(null);
   const [clickInfo, setClickInfo] = useState<ClickInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pointRisk, setPointRisk] = useState<PointRisk | null>(null);
 
   const handleMapClick = useCallback((event: google.maps.MapMouseEvent) => {
     const lat = event.latLng?.lat();
@@ -38,6 +47,7 @@ export default function Map() {
 
     setClickInfo({ lat, lng, address: null });
     setLoading(true);
+    setPointRisk(null);
 
     geocoderRef.current?.geocode(
       { location: { lat, lng } },
@@ -50,6 +60,11 @@ export default function Map() {
         }
       }
     );
+
+    fetch(`/api/point-risk?lat=${lat}&lng=${lng}`)
+      .then((res) => res.json())
+      .then((data: PointRisk) => setPointRisk(data))
+      .catch(() => setPointRisk({ ready: false, message: "Lookup failed" }));
   }, []);
 
   const initMap = useCallback(() => {
@@ -94,6 +109,22 @@ export default function Map() {
                 <span className="font-medium">Road / Area:</span>{" "}
                 {loading ? "Looking up..." : clickInfo.address}
               </p>
+              <p>
+                <span className="font-medium">Rainfall:</span>{" "}
+                {!pointRisk && "Loading..."}
+                {pointRisk && !pointRisk.ready && (pointRisk.message ?? "Not available yet")}
+                {pointRisk?.ready && `${pointRisk.rainMm?.toFixed(1)} mm/h`}
+              </p>
+              <p>
+                <span className="font-medium">Flood risk:</span>{" "}
+                {pointRisk?.ready ? pointRisk.risk : "—"}
+              </p>
+              {pointRisk?.overview && (
+                <p>
+                  <span className="font-medium">OpenWeather AI summary:</span>{" "}
+                  {pointRisk.overview}
+                </p>
+              )}
             </div>
           )}
         </CardContent>
