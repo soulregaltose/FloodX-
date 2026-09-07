@@ -127,4 +127,9 @@
   html {
     @apply font-sans;
   }
+  svg,
+  svg * {
+    border: none;
+    outline: none;
+  }
 }

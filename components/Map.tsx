@@ -79,6 +79,9 @@ export default function Map() {
     mapObjRef.current.addListener("click", handleMapClick);
   }, [handleMapClick]);
 
+  const rainMm = pointRisk?.ready ? (pointRisk.rainMm ?? 0) : null;
+  const rainMmPerSecond = rainMm == null ? null : rainMm / 3600;
+
   return (
     <div className="flex w-full flex-col gap-4">
       <Script
@@ -87,48 +90,100 @@ export default function Map() {
         onLoad={initMap}
       />
 
-      <div ref={mapRef} className="h-[500px] w-full rounded-lg border" />
+      <div className="isolate grid w-full gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(20rem,1fr)]">
+      <div
+        ref={mapRef}
+        className="relative z-0 h-[min(70vh,44rem)] min-h-[24rem] w-full overflow-hidden rounded-lg border"
+      />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Clicked Location</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {!clickInfo && <p>Click anywhere on the map to see details.</p>}
-          {clickInfo && (
-            <div className="flex flex-col gap-1">
-              <p>
-                <span className="font-medium">Latitude:</span>{" "}
-                {clickInfo.lat.toFixed(6)}
-              </p>
-              <p>
-                <span className="font-medium">Longitude:</span>{" "}
-                {clickInfo.lng.toFixed(6)}
-              </p>
-              <p>
-                <span className="font-medium">Road / Area:</span>{" "}
-                {loading ? "Looking up..." : clickInfo.address}
-              </p>
-              <p>
-                <span className="font-medium">Rainfall:</span>{" "}
-                {!pointRisk && "Loading..."}
-                {pointRisk && !pointRisk.ready && (pointRisk.message ?? "Not available yet")}
-                {pointRisk?.ready && `${pointRisk.rainMm?.toFixed(1)} mm/h`}
-              </p>
-              <p>
-                <span className="font-medium">Flood risk:</span>{" "}
-                {pointRisk?.ready ? pointRisk.risk : "—"}
-              </p>
-              {pointRisk?.overview && (
+      <div className="relative z-10 flex max-h-[min(70vh,44rem)] min-h-0 flex-col gap-4 overflow-y-auto">
+        <Card>
+          <CardHeader>
+            <CardTitle>Clicked Location</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!clickInfo && <p>Click anywhere on the map to see details.</p>}
+            {clickInfo && (
+              <div className="flex flex-col gap-1">
                 <p>
-                  <span className="font-medium">OpenWeather AI summary:</span>{" "}
-                  {pointRisk.overview}
+                  <span className="font-medium">Latitude:</span>{" "}
+                  {clickInfo.lat.toFixed(6)}
                 </p>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                <p>
+                  <span className="font-medium">Longitude:</span>{" "}
+                  {clickInfo.lng.toFixed(6)}
+                </p>
+                <p>
+                  <span className="font-medium">Road / Area:</span>{" "}
+                  {loading ? "Looking up..." : clickInfo.address}
+                </p>
+                <p>
+                  <span className="font-medium">Flood risk:</span>{" "}
+                  {pointRisk?.ready ? pointRisk.risk : "—"}
+                </p>
+                {pointRisk?.overview && (
+                  <p>
+                    <span className="font-medium">OpenWeather AI summary:</span>{" "}
+                    {pointRisk.overview}
+                  </p>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Rainfall</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {rainMm == null ? (
+              <p>
+                {!clickInfo
+                  ? "Click the map to load rainfall."
+                  : pointRisk && !pointRisk.ready
+                    ? (pointRisk.message ?? "Not available yet")
+                    : "Loading..."}
+              </p>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <PointRainfallGraph rainMm={rainMm} />
+                <p>
+                  <span className="font-medium">Rainfall:</span> {rainMm.toFixed(2)} mm/h
+                </p>
+                <p>
+                  <span className="font-medium">Rainfall per second:</span>{" "}
+                  <span className="font-mono">{rainMmPerSecond?.toFixed(6)} mm/s</span>
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+      </div>
+    </div>
+  );
+}
+
+function PointRainfallGraph({ rainMm }: { rainMm: number }) {
+  const max = 40;
+  const pct = Math.min(100, (rainMm / max) * 100);
+  return (
+    <div className="flex flex-col gap-1">
+      <div
+        className="h-3 w-full overflow-hidden rounded-full bg-muted"
+        role="img"
+        aria-label={`Rainfall ${rainMm.toFixed(2)} millimeters per hour`}
+      >
+        <div
+          className="h-full rounded-full bg-blue-600"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="text-muted-foreground flex justify-between text-[10px]">
+        <span>0 mm/h</span>
+        <span>{max} mm/h</span>
+      </div>
     </div>
   );
 }
